@@ -123,8 +123,8 @@ def load_mimic3_data_processed(data_path: str,
     static_features = static_features.droplevel(['hadm_id', 'icustay_id'])
 
     # Filling NA
-    all_vitals = all_vitals.fillna(method='ffill')
-    all_vitals = all_vitals.fillna(method='bfill')
+    all_vitals = all_vitals.ffill()
+    all_vitals = all_vitals.bfill()
 
     # Filtering longer then min_seq_length and cropping to max_seq_length
     user_sizes = all_vitals.groupby('subject_id').size()
@@ -232,8 +232,8 @@ def load_mimic3_data_raw(data_path: str,
     static_features = static_features.droplevel(['hadm_id', 'icustay_id'])
 
     # Filling NA
-    all_vitals = all_vitals.fillna(method='ffill')
-    all_vitals = all_vitals.fillna(method='bfill')
+    all_vitals = all_vitals.ffill()
+    all_vitals = all_vitals.bfill()
 
     # Filtering longer then min_seq_length and cropping to max_seq_length
     user_sizes = all_vitals.groupby('subject_id').size()
