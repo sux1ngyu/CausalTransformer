@@ -1,143 +1,133 @@
 import torch
 import torchcde
+import torchdiffeq
 from torch.nn import functional as F
+import logging
+from omegaconf import DictConfig
+from omegaconf.errors import MissingMandatoryValue
+import numpy as np
+from typing import Union
+
+from src.data import RealDatasetCollection, SyntheticDatasetCollection
+from src.models import TimeVaryingCausalModel, BRCausalModel
+from src.models.utils import BRTreatmentOutcomeHead
+from src.models.utils_cde import CDEFunc
+
+from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
-######################
-# A CDE model is defined as
-#
-# z_t = z_0 + \int_0^t f_\theta(z_s) dX_s
-#
-# Where X is your data and f_\theta is a neural network. So the first thing we need to do is define such an f_\theta.
-# That's what this CDEFunc class does.
-######################
-class CDEFunc(torch.nn.Module):
-    def __init__(self, input_channels, hidden_channels):
-        ######################
-        # input_channels is the number of input channels in the data X. (Determined by the data.)
-        # hidden_channels is the number of channels for z_t. (Determined by you!)
-        ######################
-        super(CDEFunc, self).__init__()
-        self.input_channels = input_channels
-        self.hidden_channels = hidden_channels
+class NeuralCDE(BRCausalModel):
+    model_type = 'multi'
+    possible_model_types = {'multi'}
+    tuning_criterion = 'rmse'
 
-        self.linear1 = torch.nn.Linear(
-            hidden_channels,
-            128,
-        )  # torch.nn.Linear(hidden_channels, hidden_channels)
-        self.linear2 = torch.nn.Linear(
-            128,
-            input_channels * hidden_channels,
-        )  # torch.nn.Linear(hidden_channels, input_channels * hidden_channels)
+    def __init__(self, args: DictConfig,
+                 dataset_collection: Union[RealDatasetCollection, SyntheticDatasetCollection] = None,
+                 autoregressive: bool = None,
+                 has_vitals: bool = None,
+                 projection_horizon: int = None,
+                 bce_weights: np.array = None, **kwargs):
+        super().__init__(args, dataset_collection, autoregressive, has_vitals, bce_weights)
 
-        self.W = torch.nn.Parameter(torch.Tensor(input_channels))
-        self.W.data.fill_(1)
-
-    def forward(self, t, z):
-        # z has shape (batch, hidden_channels)
-        z = self.linear1(z)
-        z = z.relu()
-        z = self.linear2(z)
-
-        ######################
-        # Ignoring the batch dimension, the shape of the output tensor must be a matrix,
-        # because we need it to represent a linear map from R^input_channels to R^hidden_channels.
-        ######################
-        z = z.view(z.size(0), self.hidden_channels, self.input_channels)
-        # z = torch.matmul(z,torch.diag(self.W))
-
-        return z
-
-
-######################
-# Next, we need to package CDEFunc up into a model that computes the integral.
-######################
-class NeuralCDE(torch.nn.Module):
-    def __init__(
-        self,
-        input_channels_x,
-        hidden_channels_x,
-        output_channels,
-        interpolation="linear",
-    ):
-        super(NeuralCDE, self).__init__()
-
-        self.embed_x = torch.nn.Linear(input_channels_x, hidden_channels_x)  # 6 -> 8
-
-        self.cde_func = CDEFunc(input_channels_x, hidden_channels_x)
-        self.combine_z = torch.nn.Linear(
-            (hidden_channels_x + hidden_channels_x) // 2,
-            hidden_channels_x * hidden_channels_x,
-        )
-        self.outcome = torch.nn.Linear(hidden_channels_x, output_channels)  # 8 -> 59
-        self.treatment = torch.nn.Linear(hidden_channels_x, 4)  # 8 -> 4
-        self.softmax = torch.nn.Softmax(dim=4)
-        self.interpolation = interpolation
-
-        self.dropout_layer = torch.nn.Dropout(0.1)
-
-        print(f"Interpolation type: {self.interpolation}")
-
-    def forward(self, coeffs_x, device, mcd=True):
-        if self.interpolation == "cubic":
-            x = torchcde.NaturalCubicSpline(coeffs_x)
-        elif self.interpolation == "linear":
-            x = torchcde.LinearInterpolation(coeffs_x)
+        if self.dataset_collection is not None:
+            self.projection_horizon = self.dataset_collection.projection_horizon
         else:
-            raise ValueError(
-                "Only 'linear' and 'cubic' interpolation methods are implemented.",
-            )
+            self.projection_horizon = projection_horizon
 
-        ######################
-        # Easy to forget gotcha: Initial hidden state should be a function of the first observation.
-        ######################
-        z_x = torch.tensor(
-            self.embed_x(x.evaluate(x.interval[0])),
-            dtype=torch.float,
-            device=device,
-        )
-        # coeffx_x: 512 * 58 * 6
-        # z_x: 512 * 8, before embed_x: 512 * 6. This is the initial values
-        # why encode both X and A simultaneously
-        # x.interval: 0,57
+        # Used in hparam tuning
+        self.input_size = self.dim_treatments + self.dim_static_features + self.dim_vitals + self.dim_outcome
+        logger.info(f'The input size of {self.model_type}: {self.input_size}')
+        assert self.autoregressive  # prev_outcomes are obligatory
 
-        ######################
-        # Solve the CDE.
-        ######################
-        # t =x.interval adds the time tracking component to the CDE
-        z_hat = torch.tensor(
-            torchcde.cdeint(
-                X=x,
-                z0=z_x,
-                func=self.cde_func,
-                t=x.interval,
-                backend="torchdiffeq",
-                method="dopri5",
-                options=dict(jump_t=x.grid_points),
-            ),
-            dtype=torch.float,
-            device=device,
-        )
-        # z_hat: 512 * 2 * 8 -> since t = 0,57
-        # why didn't output all time prediction
+        self._init_specific(args.model.multi)
+        self.save_hyperparameters(args)
 
-        ######################
-        # Both the initial value and the terminal value are returned from cdeint; extract just the terminal value,
-        # and then apply a linear map.
-        ######################
+    def _init_specific(self, sub_args: DictConfig):
+        """
+        Initialization of network
+        """
+        try:
+            self.dropout_rate = sub_args.dropout_rate
+            self.hidden_units = sub_args.hidden_units
+            self.fc_hidden_units = sub_args.fc_hidden_units
+            self.br_size = sub_args.br_size
 
-        z_hat = z_hat[:, 1]  # 获得最终点的z_hat encode
+            # input layer
+            self.embed_x = torch.nn.Linear(self.input_size, self.hidden_units)
 
-        if mcd == True:
-            z_hat = self.dropout_layer(z_hat)
+            # model of derivation f
+            self.net = CDEFunc(self.input_size, self.hidden_units)
+            # linear output layer
+            self.outcome = torch.nn.Linear(self.hidden_units, self.dim_outcome)  # 8 -> 59
+            self.treatment = torch.nn.Linear(self.hidden_units, self.dim_treatments)  # 8 -> 4
 
-        pred_y = self.outcome(z_hat) * 1150
-        # 为什么要乘以1150，pred_y是 512 * 59 维度
+            self.dropout_layer = torch.nn.Dropout(self.dropout_rate)
 
-        pred_a = self.treatment(z_hat)
-        # pred_a: 512 * 4 维度
+            # treatment and outcome output layer
+            self.br_treatment_outcome_head = BRTreatmentOutcomeHead(self.hidden_units, self.br_size,
+                                                                    self.fc_hidden_units, self.dim_treatments, self.dim_outcome,
+                                                                    self.alpha, self.update_alpha, self.balancing)
 
-        pred_a_softmax = F.log_softmax(pred_a, dim=1)
+        except MissingMandatoryValue:
+            logger.warning(f"{self.model_type} not fully initialised - some mandatory args are missing! "
+                           f"(It's ok, if one will perform hyperparameters search afterward).")
 
-        return pred_y, pred_a_softmax, pred_a, z_hat
+    def forward(self, batch, detach_treatment=False):
+        fixed_split = batch['future_past_split'] if 'future_past_split' in batch else None
+
+        if self.training and self.hparams.model.multi.augment_with_masked_vitals and self.has_vitals:
+            # Augmenting original batch with vitals-masked copy
+            assert fixed_split is None  # Only for training data
+            fixed_split = torch.empty((2 * len(batch['active_entries']),)).type_as(batch['active_entries'])
+            for i, seq_len in enumerate(batch['active_entries'].sum(1).int()):
+                fixed_split[i] = seq_len  # Original batch
+                fixed_split[len(batch['active_entries']) + i] = torch.randint(0, int(seq_len) + 1, (1,)).item()  # Augmented batch
+
+            for (k, v) in batch.items():
+                batch[k] = torch.cat((v, v), dim=0)
+
+        prev_treatments = batch['prev_treatments']  # treatments :-1
+        vitals = batch['vitals'] if self.has_vitals else None  # vitals 1:
+        prev_outputs = batch['prev_outputs']  # outcomes :-1
+        static_features = batch['static_features']  # static_features, need unsqueeze(1) on time
+        curr_treatments = batch['current_treatments']  # treatments 1:
+        # only one time ahead of the prev_treatments
+        active_entries = batch['active_entries']  # active_entries 1:
+
+        # In synthetic dataset, we want the covariates and treatments to be :-1. outcome 1: (covariates contain outomes)
+        # In real dataset, we want previous treatment, current covariates, previous outputs to predict current output & current treatment
+        observ_x = torch.concat((prev_treatments, vitals, prev_outputs, static_features.unsqueeze(1).repeat(1, vitals.shape[1], 1)), dim=2)
+
+        batch_size, sequence_len, _ = observ_x.shape
+
+        z0_value = self.embed_x(observ_x[:, 0, :])
+        # 512 * 144
+
+        pred_series = []
+        for time_step in range(sequence_len):
+            if time_step == 0:
+                # first point: ODE
+                time_interval = torch.arange(time_step, time_step+2, dtype=torch.float, device=z0_value.device)
+                self.net.ode_case = True
+                z_t = torchdiffeq.odeint_adjoint(func=self.net, y0=z0_value, t=time_interval)[-1]
+                # output both begin point and end point
+            else:
+                coeffs_x = torchcde.linear_interpolation_coeffs(observ_x[:, :(time_step+1), :])
+                x = torchcde.LinearInterpolation(coeffs_x)
+                self.net.ode_case = False
+                z_t = torchcde.cdeint(X=x, z0=z0_value, func=self.net, t=x.interval, backend="torchdiffeq", method="dopri5")[:, 1]
+            pred_series.append(z_t)
+        pred_series = torch.stack(pred_series, dim=1)
+
+        pred_series = self.dropout_layer(pred_series)
+
+        # output layers
+        br = self.br_treatment_outcome_head.build_br(pred_series)
+        treatment_pred = self.br_treatment_outcome_head.build_treatment(br, detach_treatment)  # # bn*seq*dim
+        outcome_pred = self.br_treatment_outcome_head.build_outcome(br, curr_treatments)  # bn*seq*dim
+
+        return treatment_pred, outcome_pred, br
+
 

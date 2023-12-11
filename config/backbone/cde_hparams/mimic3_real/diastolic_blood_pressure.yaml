@@ -4,25 +4,14 @@ dataset:
     - diastolic blood pressure
 
 model:
-  encoder:
+  multi:
     optimizer:
       learning_rate: 0.001
     batch_size: 256
-    seq_hidden_units: 144
-    br_size: 72
-    fc_hidden_units: 36
+    hidden_units: 144  # CDE hidden dimension
+    br_size: 72  # CDE hidden dimension -> br_size
+    fc_hidden_units: 36  # output layer, linear hidden dimension
     dropout_rate: 0.1
 
-  train_decoder: True
-  decoder:
-    optimizer:
-      learning_rate: 0.0001
-    batch_size: 256
-    br_size: 94
-    fc_hidden_units: 188
-    dropout_rate: 0.2
-
 exp:
-  weights_ema: False
-  balancing: grad_reverse
   max_epochs: 200

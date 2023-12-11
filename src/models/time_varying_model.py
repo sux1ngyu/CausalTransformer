@@ -155,6 +155,10 @@ class TimeVaryingCausalModel(LightningModule):
         return optimizer
 
     def train_dataloader(self) -> DataLoader:
+        """
+        no input for dataloader
+        return: DataLoader
+        """
         sub_args = self.hparams.model[self.model_type]
         return DataLoader(self.dataset_collection.train_f, shuffle=True, batch_size=sub_args['batch_size'], drop_last=True)
 
@@ -456,6 +460,14 @@ class BRCausalModel(TimeVaryingCausalModel):
             self.trainer.logger.filter_submodels = ['encoder', 'decoder']
 
     def training_step(self, batch, batch_ind, optimizer_idx=0):
+        """
+        input is fix
+        batch: current batch data
+        batch_ind: current index of batch
+        optimizer_idx: if use multiple optimizers, this will give whether optimizer to use
+        return: a dict containing loss: {'loss': loss}. OR loss value only
+        这个地方应该隐含了for epoch in num_epoch，training_step会被反复调用
+        """
         for par in self.parameters():
             par.requires_grad = True
 
@@ -557,4 +569,6 @@ class BRCausalModel(TimeVaryingCausalModel):
         # Creating Dataloader
         data_loader = DataLoader(dataset, batch_size=self.hparams.dataset.val_batch_size, shuffle=False)
         outcome_pred, _ = [torch.cat(arrs) for arrs in zip(*self.trainer.predict(self, data_loader))]
+        # self.trainer就是Trainer
+        # 在调用trainer.predict的时候，应该传入predict(model, dataloader)参数，模型会自动得到每个batch并调用predict_step函数
         return outcome_pred.numpy()

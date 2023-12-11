@@ -2,7 +2,7 @@
 model:
   name: CDE
   multi:                                  # Missing hyperparameters are to be filled in command line / with tune_hparams = True / selected with +backbone/ct_hparams=...
-    _target_: src.models.ct.CT
+    _target_: src.models.cde.NeuralCDE
     max_seq_length: ${sum:${dataset.max_seq_length},${dataset.projection_horizon}}  # Will be calculated dynamically
     seq_hidden_units:                    # transformer hidden units (d_h / d_model)
     br_size:
@@ -34,5 +34,5 @@ model:
 
 exp:
   weights_ema: True
-  balancing: domain_confusion
+  balancing: grad_reverse
   alpha: 0.01

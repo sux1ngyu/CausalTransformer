@@ -79,6 +79,10 @@ class BRTreatmentOutcomeHead(nn.Module):
         self.treatment_head_params = ['linear2', 'linear3']
 
     def build_treatment(self, br, detached=False):
+        """
+        br_size -> hidden_unit
+        hidden_unit -> treatment_dim
+        """
         if detached:
             br = br.detach()
 
@@ -90,12 +94,19 @@ class BRTreatmentOutcomeHead(nn.Module):
         return treatment
 
     def build_outcome(self, br, current_treatment):
+        """
+        br_size + treatment_dim -> hidden_unit
+        hidden_unit -> outcome_dim
+        """
         x = torch.cat((br, current_treatment), dim=-1)
         x = self.elu3(self.linear4(x))
         outcome = self.linear5(x)
         return outcome
 
     def build_br(self, seq_output):
+        """
+        hidden_unit -> br_size
+        """
         br = self.elu1(self.linear1(seq_output))
         return br
 

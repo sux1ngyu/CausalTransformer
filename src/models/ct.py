@@ -107,6 +107,7 @@ class CT(EDCT):
     def prepare_data(self) -> None:
         if self.dataset_collection is not None and not self.dataset_collection.processed_data_multi:
             self.dataset_collection.process_data_multi()
+            # 这一步设置test_f_multi = deepcopy test_f
         if self.bce_weights is None and self.hparams.exp.bce_weight:
             self._calculate_bce_weights()
 
@@ -138,7 +139,10 @@ class CT(EDCT):
         return treatment_pred, outcome_pred, br
 
     def build_br(self, prev_treatments, vitals, prev_outputs, static_features, active_entries, fixed_split):
-
+        """
+        Here, it will distinguish vitals = None or not, if not None -> encoder, if None -> decoder for future
+        In future prediction, we don't have vitals. We only have treatment, and predicted outcome (autoregressive)
+        """
         active_entries_treat_outcomes = torch.clone(active_entries)
         active_entries_vitals = torch.clone(active_entries)
 

@@ -62,17 +62,18 @@ class MIMIC3RealDataset(Dataset):
         user_sizes = user_sizes.values
 
         self.data = {
-            'sequence_lengths': user_sizes - 1,
-            'prev_treatments': treatments[:, :-1, :],
-            'vitals': vitals[:, 1:, :],
-            'next_vitals': vitals[:, 2:, :],
-            'current_treatments': treatments[:, 1:, :],
-            'static_features': static_features,
-            'active_entries': active_entries[:, 1:, :],
-            'outputs': outcomes[:, 1:, :],
-            'unscaled_outputs': outcomes_unscaled[:, 1:, :],
-            'prev_outputs': outcomes[:, :-1, :],
+            'sequence_lengths': user_sizes - 1,  # 3500
+            'prev_treatments': treatments[:, :-1, :],  # 3500 * 59 * 2
+            'vitals': vitals[:, 1:, :],  # 3500 * 59 * 25
+            'next_vitals': vitals[:, 2:, :],  # 3500 * 58 * 25
+            'current_treatments': treatments[:, 1:, :],  # 3500 * 59 * 2
+            'static_features': static_features,  # 3500 * 44
+            'active_entries': active_entries[:, 1:, :],  # 3500 * 59 * 1
+            'outputs': outcomes[:, 1:, :],  # 3500 * 59 * 1
+            'unscaled_outputs': outcomes_unscaled[:, 1:, :],  # 3500 * 59 * 1
+            'prev_outputs': outcomes[:, :-1, :],  # 3500 * 59 * 1
         }
+        # the val/test other group is 750, so total 50000 samples
 
         self.scaling_params = scaling_params
         self.processed = True

@@ -16,6 +16,8 @@ torch.set_default_dtype(torch.double)
 
 
 @hydra.main(config_name=f'config.yaml', config_path='../config/')
+# 此处指定了args的来源，即读取的这个文件
+# 并且命令行里面+后面的yaml file，将会全部读取到args里面去
 def main(args: DictConfig):
     """
     Training / evaluation script for CT (Causal Transformer)
@@ -56,6 +58,8 @@ def main(args: DictConfig):
 
     # ============================== Initialisation & Training of multimodel ==============================
     multimodel = instantiate(args.model.multi, args, dataset_collection, _recursive_=False)
+    # 此处是模型的初始化
+    # 模型的路径在args.model.multi的_target_里面，而后面的args和dataset_collection则是传递给这个模型的参数
     if args.model.multi.tune_hparams:
         multimodel.finetune(resources_per_trial=args.model.multi.resources_per_trial)
 
@@ -63,10 +67,19 @@ def main(args: DictConfig):
                                  callbacks=multimodel_callbacks, terminate_on_nan=True,
                                  gradient_clip_val=args.model.multi.max_grad_norm)
     multimodel_trainer.fit(multimodel)
+    # trainer 和 fit是一起使用的，意思就是按照训练的顺序调用函数
+    # 例如：CT函数的调用顺序：
+    # 1. ct.py里面的class CT的prepare_data函数
+    # 2. time_varying_model.py里面的class BRCausalModel 的configure_optimizers函数
+    # 3. BRCausalModel 的 on_fit_start
+    # 4. TimeVaryingCausalModel 的 train_dataloader
+    # 然后应该就是 training_step 和 forward 函数
+    # 然后on_fit_end函数，结束fit的过程
 
     # Validation factual rmse
     val_dataloader = DataLoader(dataset_collection.val_f, batch_size=args.dataset.val_batch_size, shuffle=False)
     multimodel_trainer.test(multimodel, test_dataloaders=val_dataloader)
+    # 这个地方指的是data loader将会设置为模型已经重写过的val_dataloader，而不是lightning默认的test_dataloader
     # multimodel.visualize(dataset_collection.val_f, index=0, artifacts_path=artifacts_path)
     val_rmse_orig, val_rmse_all = multimodel.get_normalised_masked_rmse(dataset_collection.val_f)
     logger.info(f'Val normalised RMSE (all): {val_rmse_all}; Val normalised RMSE (orig): {val_rmse_orig}')
@@ -86,6 +99,7 @@ def main(args: DictConfig):
             'encoder_test_rmse_last': test_rmse_last
         }
     elif hasattr(dataset_collection, 'test_f'):  # Test factual rmse
+        # 在real_dataset.py里面有设置，train_f和test_f都是MIMIC3RealDataset
         test_rmse_orig, test_rmse_all = multimodel.get_normalised_masked_rmse(dataset_collection.test_f)
         logger.info(f'Test normalised RMSE (all): {test_rmse_all}; '
                     f'Test normalised RMSE (orig): {test_rmse_orig}.')
